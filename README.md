@@ -11,5 +11,5 @@ qualification. The current input-lifecycle observation source is included.
 The host still owns signed package selection, companion permits and default-off
 input grants. Publishing this source neither activates input nor lets an
 extension authorize itself. Amaterasu owns this repository; third parties
-consume its contracts in their own repositories. The source license remains
-pending.
+consume its contracts in their own repositories. Project-authored source is
+MIT licensed.
