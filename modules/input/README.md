@@ -17,6 +17,37 @@ only when an enabled acquire reaches its active-request check. No devices are
 created merely by loading the module. Windows ignores `uinput_path`. macOS and
 other platforms report unsupported native injection instead of simulated success.
 
+## Optional input lifecycle observations
+
+The signed startup setting `"observe_input_lifecycle":true` opts in to
+count-only observations when `allow_injection` is also enabled. The signed
+runtime policy must independently grant `amaterasu.input` Publish on the exact
+topic `amaterasu.input.lifecycle/1`; the default policy has no such grant.
+The first denied or failed publication disables observation for that module
+instance without changing input delivery or lease cleanup.
+
+For a typed batch with 1–64 events, the module records a retrospective
+`before_input` requested count and an `after_input` acknowledged-prefix count
+after the controller decides the batch. These are deferred `Observe` facts:
+they cannot veto, transform, or delay native injection. An acknowledged event
+may have been suppressed by input policy, and a failed batch with
+`partial_event_possible` may have physically delivered one more event than its
+acknowledged prefix. The facts are therefore not physical-delivery counts.
+Malformed, empty, and oversized batches emit no lifecycle pair. Each fact
+contains only the contract version, event ID, point, mode, and count; no input
+codes, coordinates, client identity, lease, token, or raw request/response
+crosses the broker.
+
+At most 16 complete pairs queue locally, and one pair is published per module
+tick after input request decisions. Full queues drop new pairs, and a failed
+broker call discards the remaining queue. The queue is dropped on module
+unload. Broker sequence/resync detects losses after a publish reaches the
+broker; local queue drops are not reliably reported to subscribers. The two
+facts in a pair are sent separately, so a failed second send can leave an
+orphaned `before_input`; consumers must treat that as incomplete rather than
+assuming atomic pair delivery. This is an optional metadata path, not an input extension
+callback or a new injection grant.
+
 ## Durable input policy
 
 The input module loads the caller-scoped product document `product/amaterasu.input`

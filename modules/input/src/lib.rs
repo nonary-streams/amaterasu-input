@@ -7,6 +7,7 @@ mod feedback;
 mod gamepad;
 mod gamepad_profile;
 mod model;
+mod observations;
 mod product_settings;
 
 use amaterasu_input_policy::KeyBindings;
@@ -14,6 +15,7 @@ use amaterasu_module_sdk::{Command, ManagedModule, ModuleResult, Response, Runti
 use backend::NativeBackend;
 use controller::Controller;
 use model::{InputError, MAX_QUEUED_REQUESTS, Operation};
+use observations::{InputObservations, TOPIC};
 use product_settings::{InputPolicyUpdate, ProductSettings};
 use serde::Deserialize;
 use serde_json::Value;
@@ -35,6 +37,8 @@ struct Settings {
     linux_companion_socket_path: String,
     #[serde(default)]
     windows_backend: Option<String>,
+    #[serde(default)]
+    observe_input_lifecycle: bool,
 }
 fn default_uinput_path() -> String {
     "/dev/uinput".into()
@@ -58,6 +62,7 @@ struct InputModule {
     runtime: RuntimeClient,
     controller: Controller<NativeBackend>,
     product_settings: ProductSettings,
+    observations: InputObservations,
     queued: VecDeque<QueuedRequest>,
 }
 
@@ -158,6 +163,9 @@ impl ManagedModule for InputModule {
             runtime,
             controller: Controller::new(backend, settings.allow_injection),
             product_settings: ProductSettings::new(),
+            observations: InputObservations::new(
+                settings.allow_injection && settings.observe_input_lifecycle,
+            ),
             queued: VecDeque::new(),
         })
     }
@@ -184,6 +192,11 @@ impl ManagedModule for InputModule {
             self.accept_request(id, caller, service, payload, remaining_ms)?;
         }
         self.drain_queued()?;
+        // Observation leaves only after all input requests for this tick have
+        // been decided. Broker/backpressure failures cannot fail injection.
+        let runtime = &self.runtime;
+        self.observations
+            .flush(|event| runtime.publish_lifecycle_event(TOPIC, event));
         Ok(())
     }
 }
@@ -344,6 +357,14 @@ impl InputModule {
         let operation: Result<Operation, _> = serde_json::from_value(request.payload);
         match operation {
             Ok(operation) => {
+                let observed_batch = match &operation {
+                    Operation::Batch { events, .. }
+                        if (1..=model::MAX_EVENTS).contains(&events.len()) =>
+                    {
+                        Some(events.len())
+                    }
+                    _ => None,
+                };
                 let runtime = &self.runtime;
                 let mut check = || match runtime.send(Command::CheckRequest {
                     request: request.id,
@@ -372,6 +393,9 @@ impl InputModule {
                 let reply =
                     self.controller
                         .handle(&request.caller, operation, Instant::now(), &mut check);
+                if let Some(requested) = observed_batch {
+                    self.observations.record_batch(requested, &reply);
+                }
                 let cleanup = completion_requires_cleanup(cleanup_if_completion_is_lost, &reply);
                 self.complete(request.id, reply, &request.caller, cleanup)
             }
