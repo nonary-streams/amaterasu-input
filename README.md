@@ -1,7 +1,7 @@
-# Standalone Amaterasu input source (publication candidate)
+# Standalone Amaterasu input source
 
 This workspace holds the native input module and OS companion. The functional
-contract is in `modules/input/README.md`. Its proposed portable Cargo pins
+contract is in `modules/input/README.md`. Its portable Cargo pins
 reference exact commits of `nonary-streams/amaterasu-sdk` and
 `nonary-streams/amaterasu-protocol`; the committed lockfile records the locally
 validated resolution. Run `cargo test --workspace --locked --offline --no-run`
