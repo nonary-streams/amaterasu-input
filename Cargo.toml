@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["modules/input", "crates/input-companion"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+version = "0.1.0"
+
+[workspace.dependencies]
+amaterasu-module-sdk = { git = "file:///tmp/amaterasu-modular-repos/foundation", rev = "28da5667f73e26d812b0e485f50f0a5c77c5e4f0" }
+amaterasu-storage = { git = "file:///tmp/amaterasu-modular-repos/foundation", rev = "28da5667f73e26d812b0e485f50f0a5c77c5e4f0" }
+amaterasu-gamestream = { git = "file:///tmp/amaterasu-modular-repos/protocol", rev = "32c64d07b80fce5779b530057757476cdfae4b3d" }
+amaterasu-input-policy = { git = "file:///tmp/amaterasu-modular-repos/protocol", rev = "32c64d07b80fce5779b530057757476cdfae4b3d" }
+amaterasu-input-companion = { path = "crates/input-companion" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
