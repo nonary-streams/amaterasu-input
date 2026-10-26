@@ -9,10 +9,10 @@ rust-version = "1.89"
 version = "0.1.0"
 
 [workspace.dependencies]
-amaterasu-module-sdk = { git = "https://github.com/nonary-streams/amaterasu-sdk.git", rev = "6532699fdce2a0335e9b23ea96c9dfdbfec597a1" }
-amaterasu-storage = { git = "https://github.com/nonary-streams/amaterasu-sdk.git", rev = "6532699fdce2a0335e9b23ea96c9dfdbfec597a1" }
-amaterasu-gamestream = { git = "https://github.com/nonary-streams/amaterasu-protocol.git", rev = "3199aaa3974d5f582d2c72763dfe64188a33ab8d" }
-amaterasu-input-policy = { git = "https://github.com/nonary-streams/amaterasu-protocol.git", rev = "3199aaa3974d5f582d2c72763dfe64188a33ab8d" }
+amaterasu-module-sdk = { git = "https://github.com/nonary-streams/amaterasu-sdk.git", rev = "afeeab49f828ace1b6c9ed5a138701e1b8d3ba68" }
+amaterasu-storage = { git = "https://github.com/nonary-streams/amaterasu-sdk.git", rev = "afeeab49f828ace1b6c9ed5a138701e1b8d3ba68" }
+amaterasu-gamestream = { git = "https://github.com/nonary-streams/amaterasu-protocol.git", rev = "a5088b27d2632f9746b685223f6d7876702938ed" }
+amaterasu-input-policy = { git = "https://github.com/nonary-streams/amaterasu-protocol.git", rev = "a5088b27d2632f9746b685223f6d7876702938ed" }
 amaterasu-input-companion = { path = "crates/input-companion" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
