@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "family": "input",
+  "repository": "https://github.com/nonary-streams/amaterasu-input",
+  "mount": "modules/input",
+  "components": [
+    {
+      "id": "amaterasu.input",
+      "package": "amaterasu-input",
+      "path": ".",
+      "name": "Input",
+      "summary": "Delivers keyboard, mouse and controller input to the host."
+    }
+  ]
+}

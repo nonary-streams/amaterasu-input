@@ -692,3 +692,33 @@ References: [Windows SendInput](https://learn.microsoft.com/en-us/windows/win32/
 [Linux uinput guide](https://kernel.org/doc/html/latest/input/uinput.html),
 [Linux v6.12 uinput UAPI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/uinput.h),
 [Linux v6.12 event codes](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/input-event-codes.h).
+
+## Building this repository
+
+This module lives in its own repository and is mounted by
+[Amaterasu](https://github.com/nonary-streams/amaterasu) at `modules/input`,
+where it builds as a member of the host workspace. Its manifest inherits shared
+dependencies and lints from that workspace, so a standalone build stages the
+same layout around a checkout of the
+[SDK](https://github.com/nonary-streams/amaterasu-sdk) at the commit named in
+`sdk-revision`:
+
+```sh
+git clone https://github.com/nonary-streams/amaterasu-sdk .sdk
+git -C .sdk checkout "$(cat sdk-revision)"
+export CARGO_TARGET_DIR="$PWD/target"
+python3 scripts/build-native.py .sdk --fmt
+python3 scripts/build-native.py .sdk --test
+python3 scripts/build-native.py .sdk --clippy
+python3 scripts/build-native.py .sdk --release --artifacts dist
+```
+
+Neither checkout is modified. `Cargo.lock` records the resolution those
+commands were validated with; after changing `sdk-revision` or a dependency,
+refresh it with `python3 scripts/build-native.py .sdk --update-lock`.
+
+Continuous integration runs the same four commands on Linux, Windows and
+macOS. Pushing a tag `vX.Y.Z` that matches the version in `Cargo.toml` builds
+the Linux and Windows libraries, attests where they were built, and publishes
+them as a GitHub release. A host installs this module as part of the signed
+Amaterasu module set; a release here is not an installable package on its own.
