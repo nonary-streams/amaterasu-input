@@ -420,9 +420,25 @@ impl ShortcutJob {
                         .saturating_duration_since(Instant::now())
                         .as_millis() as u64;
                     self.store = Some(ShortcutStore::new(self.epoch.clone())?);
-                    self.discovery = Some(DiscoveryJob::new(self.parent, context, timeout)?);
+                    let no_actions = authority.allowed_actions.is_empty();
+                    if no_actions {
+                        // The authenticated binding cannot invoke any shortcut. Avoid
+                        // requiring a registry that this composition need not provide.
+                        self.cache_snapshot = Some(Snapshot {
+                            context: authority.context.clone(),
+                            approval_revision: 0,
+                            settings_revisions: BTreeMap::new(),
+                            bindings: Vec::new(),
+                        });
+                    } else {
+                        self.discovery = Some(DiscoveryJob::new(self.parent, context, timeout)?);
+                    }
                     self.authority = Some(authority);
-                    Step::Discover
+                    if no_actions {
+                        Step::Load
+                    } else {
+                        Step::Discover
+                    }
                 }
             },
             Step::Discover => {
@@ -981,6 +997,10 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["operation_id"], "input-epoch:1");
         assert_eq!(trace.borrow().len(), 1);
+        assert_eq!(
+            host.registry_requests, 0,
+            "a binding with no actions needs no registry"
+        );
         assert_eq!(
             host.value.as_ref().unwrap()["receipts"]["1"]["phase"],
             "delivered"
