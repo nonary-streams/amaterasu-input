@@ -187,29 +187,7 @@ impl Journal {
             .checked_add(1)
             .ok_or(JournalError::Capacity)?;
         proposed.receipts.insert(sequence, record);
-        while proposed.receipts.len() > MAX_RECORDS
-            || serde_json::to_vec(&proposed)
-                .map_err(|_| JournalError::Invalid)?
-                .len()
-                > MAX_JOURNAL_BYTES
-        {
-            let Some((&oldest, entry)) = proposed.receipts.first_key_value() else {
-                return Err(JournalError::Capacity);
-            };
-            if oldest == sequence
-                || entry.phase != Phase::Delivered
-                || entry.result.is_none()
-                || entry
-                    .intents
-                    .iter()
-                    .any(|intent| intent.phase != IntentPhase::Terminal)
-            {
-                return Err(JournalError::Capacity);
-            }
-            proposed.receipts.remove(&oldest);
-            proposed.retired_sequence = oldest;
-        }
-        self.replace_checked(proposed)?;
+        self.replace_checked(proposed, Some(sequence))?;
         Ok(Admission::New)
     }
 
@@ -241,7 +219,7 @@ impl Journal {
             .revision
             .checked_add(1)
             .ok_or(JournalError::Capacity)?;
-        self.replace_checked(proposed)
+        self.replace_checked(proposed, Some(sequence))
     }
 
     /// Persist each dispatch transition before sending or reporting an action.
@@ -288,7 +266,7 @@ impl Journal {
             .revision
             .checked_add(1)
             .ok_or(JournalError::Capacity)?;
-        self.replace_checked(proposed)
+        self.replace_checked(proposed, Some(sequence))
     }
 
     /// A restart cannot establish whether a previously armed native call ran.
@@ -317,18 +295,42 @@ impl Journal {
                 .revision
                 .checked_add(1)
                 .ok_or(JournalError::Capacity)?;
-            self.replace_checked(proposed)?;
+            self.replace_checked(proposed, None)?;
         }
         Ok(changed)
     }
 
-    fn replace_checked(&mut self, proposed: Self) -> Result<(), JournalError> {
-        if serde_json::to_vec(&proposed)
-            .map_err(|_| JournalError::Invalid)?
-            .len()
-            > MAX_JOURNAL_BYTES
+    fn replace_checked(
+        &mut self,
+        mut proposed: Self,
+        protected_sequence: Option<u64>,
+    ) -> Result<(), JournalError> {
+        // Results and recovery phase names can grow after admission. Retire
+        // only a contiguous completed prefix for every transition, not just
+        // for a new batch. Preserve the current operation and newest held
+        // snapshot; uncertain effects must remain available for recovery.
+        while proposed.receipts.len() > MAX_RECORDS
+            || serde_json::to_vec(&proposed)
+                .map_err(|_| JournalError::Invalid)?
+                .len()
+                > MAX_JOURNAL_BYTES
         {
-            return Err(JournalError::Capacity);
+            let Some((&oldest, entry)) = proposed.receipts.first_key_value() else {
+                return Err(JournalError::Capacity);
+            };
+            if Some(oldest) == protected_sequence
+                || proposed.receipts.len() == 1
+                || entry.phase != Phase::Delivered
+                || entry.result.is_none()
+                || entry
+                    .intents
+                    .iter()
+                    .any(|intent| intent.phase != IntentPhase::Terminal)
+            {
+                return Err(JournalError::Capacity);
+            }
+            proposed.receipts.remove(&oldest);
+            proposed.retired_sequence = oldest;
         }
         proposed.validate()?;
         *self = proposed;
@@ -503,6 +505,125 @@ mod tests {
         journal
             .transition_intent(4, 1, 0, IntentPhase::Terminal, Some(result))
             .unwrap();
+    }
+
+    fn pad_journal(journal: &mut Journal, free_bytes: usize) {
+        journal.receipts.get_mut(&1).unwrap().fingerprint["request"] = json!("");
+        let size = serde_json::to_vec(journal).unwrap().len();
+        journal.receipts.get_mut(&1).unwrap().fingerprint["request"] =
+            json!("x".repeat(MAX_JOURNAL_BYTES - free_bytes - size));
+        assert_eq!(
+            serde_json::to_vec(journal).unwrap().len(),
+            MAX_JOURNAL_BYTES - free_bytes
+        );
+        journal.validate().unwrap();
+    }
+
+    fn journal_near_byte_limit() -> Journal {
+        let mut journal = Journal::new("epoch".into()).unwrap();
+        let mut previous = armed("old");
+        previous.intents.clear();
+        journal.admit(0, 1, previous).unwrap();
+        journal
+            .finish(1, 1, Phase::Delivered, Some(json!({"ok":true})))
+            .unwrap();
+        let mut current = armed("backspace");
+        current.intents.clear();
+        journal.admit(2, 2, current).unwrap();
+        // The incident had 25 bytes free after admission, but its delivery
+        // result needed 82 more bytes. Use synthetic padding, never typed text.
+        pad_journal(&mut journal, 25);
+        journal
+    }
+
+    #[test]
+    fn delivery_result_can_retire_completed_prefix_at_byte_limit() {
+        let mut journal = journal_near_byte_limit();
+        let result = json!({"ok":true,"accepted":1,"suppressed":0,"lease":"0123456789abcdef0123456789abcdef"});
+        journal
+            .finish(journal.revision, 2, Phase::Delivered, Some(result.clone()))
+            .unwrap();
+        assert_eq!(journal.retired_sequence, 1);
+        assert_eq!(journal.lookup(2).unwrap().result, Some(result));
+        assert_eq!(journal.lookup(2).unwrap().held, json!(["key"]));
+        assert_eq!(
+            journal.admit(journal.revision, 1, armed("old")),
+            Err(JournalError::ReceiptExpired)
+        );
+        journal.validate().unwrap();
+    }
+
+    #[test]
+    fn result_growth_never_evicts_unresolved_prefix() {
+        let mut journal = journal_near_byte_limit();
+        journal.receipts.get_mut(&1).unwrap().phase = Phase::RecoveryRequired;
+        pad_journal(&mut journal, 25);
+        let before = journal.clone();
+        assert_eq!(
+            journal.finish(
+                journal.revision,
+                2,
+                Phase::Delivered,
+                Some(json!({"ok":true,"detail":"x".repeat(100)}))
+            ),
+            Err(JournalError::Capacity)
+        );
+        assert_eq!(journal, before);
+    }
+
+    #[test]
+    fn action_result_growth_retires_only_completed_prefix() {
+        let mut journal = journal_near_byte_limit();
+        let record = journal.receipts.get_mut(&2).unwrap();
+        record.phase = Phase::Delivered;
+        record.result = Some(json!({"ok":true}));
+        record.intents = armed("action").intents;
+        record.intents[0].phase = IntentPhase::Dispatching;
+        pad_journal(&mut journal, 25);
+        let result = json!({"status":"succeeded","detail":"x".repeat(100)});
+        journal
+            .transition_intent(
+                journal.revision,
+                2,
+                0,
+                IntentPhase::Finishing,
+                Some(result.clone()),
+            )
+            .unwrap();
+        assert_eq!(journal.retired_sequence, 1);
+        assert_eq!(journal.lookup(2).unwrap().intents[0].result, Some(result));
+        journal.validate().unwrap();
+    }
+
+    #[test]
+    fn recovery_phase_growth_preserves_ambiguous_delivery() {
+        let mut journal = journal_near_byte_limit();
+        pad_journal(&mut journal, 5);
+        assert!(journal.recover(journal.revision).unwrap());
+        assert_eq!(journal.retired_sequence, 1);
+        assert_eq!(journal.lookup(2).unwrap().phase, Phase::RecoveryRequired);
+        assert_eq!(journal.lookup(2).unwrap().result, None);
+        assert!(!journal.recover(journal.revision).unwrap());
+    }
+
+    #[test]
+    fn compaction_preserves_the_receipt_being_completed() {
+        let mut journal = journal_near_byte_limit();
+        let record = journal.receipts.get_mut(&1).unwrap();
+        record.phase = Phase::Armed;
+        record.result = None;
+        pad_journal(&mut journal, 25);
+        let before = journal.clone();
+        assert_eq!(
+            journal.finish(
+                journal.revision,
+                1,
+                Phase::Delivered,
+                Some(json!({"ok":true,"detail":"x".repeat(100)}))
+            ),
+            Err(JournalError::Capacity)
+        );
+        assert_eq!(journal, before);
     }
 
     #[test]
