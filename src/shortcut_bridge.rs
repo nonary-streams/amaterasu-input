@@ -85,6 +85,16 @@ impl StagedBatch {
         self.authorized_target = target;
     }
 
+    pub fn is_fully_forwarded(&self) -> bool {
+        self.intents.is_empty()
+            && self.dispositions.iter().all(|d| *d == Disposition::Forward)
+            && self
+                .matcher
+                .held_snapshot()
+                .iter()
+                .all(|(_, d)| *d != Disposition::Consume)
+    }
+
     /// A fully forwarded batch has no shortcut ownership or action effects and
     /// can use the lease's ordered, revocation-guarded native path directly.
     pub fn deliver_forwarded<B: Backend>(
@@ -93,14 +103,7 @@ impl StagedBatch {
         now: Instant,
         guard: &mut impl FnMut() -> InputResult<()>,
     ) -> InputResult<Value> {
-        if !self.intents.is_empty()
-            || self.dispositions.iter().any(|d| *d != Disposition::Forward)
-            || self
-                .matcher
-                .held_snapshot()
-                .iter()
-                .any(|(_, d)| *d == Disposition::Consume)
-        {
+        if !self.is_fully_forwarded() {
             return Err(InputError::new(
                 "invalid_sequence",
                 "shortcut ownership requires durable admission",

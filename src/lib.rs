@@ -1258,7 +1258,8 @@ impl InputModule {
                         );
                     }
                 }
-                self.complete(request, payload, &caller, false)
+                let cleanup = completion_requires_cleanup(job.forwarded_delivery(), &payload);
+                self.complete(request, payload, &caller, cleanup)
             }
             Err(message) => {
                 let armed = job.armed();
@@ -1296,21 +1297,30 @@ impl InputModule {
         caller: &str,
         cleanup_on_loss: bool,
     ) -> ModuleResult<()> {
-        match self.runtime.send(Command::Complete { request, payload }) {
-            Ok(Response::Ok) => Ok(()),
-            Ok(Response::Error { code, .. }) if code == "request_ended" || code == "not_found" => {
-                if cleanup_on_loss {
-                    self.controller.cancel_owner(caller);
-                }
-                Ok(())
-            }
-            failure => {
-                if cleanup_on_loss {
-                    self.controller.cancel_owner(caller);
-                }
-                Err(format!("input completion failed: {failure:?}"))
-            }
+        complete_input_response(
+            self.runtime.send(Command::Complete { request, payload }),
+            cleanup_on_loss,
+            || self.controller.cancel_owner(caller),
+        )
+    }
+}
+
+fn complete_input_response(
+    response: ModuleResult<Response>,
+    cleanup_on_loss: bool,
+    cancel: impl FnOnce(),
+) -> ModuleResult<()> {
+    if matches!(response, Ok(Response::Ok)) {
+        return Ok(());
+    }
+    if cleanup_on_loss {
+        cancel();
+    }
+    match response {
+        Ok(Response::Error { code, .. }) if code == "request_ended" || code == "not_found" => {
+            Ok(())
         }
+        failure => Err(format!("input completion failed: {failure:?}")),
     }
 }
 

@@ -1,5 +1,6 @@
 //! One bounded, broker-driven shortcut batch. No native event is delivered
-//! before the lifecycle/action reservations and journal CAS have succeeded.
+//! before lifecycle validation. Shortcut ownership and actions additionally
+//! require durable reservations and journal CAS before native delivery.
 use crate::{
     backend::Backend,
     controller::Controller,
@@ -114,6 +115,7 @@ pub(crate) struct ShortcutJob {
     dispatch_index: usize,
     armed: bool,
     transferred: bool,
+    forwarded_delivery: bool,
     instance: String,
     call_sequence: u64,
 }
@@ -184,8 +186,13 @@ impl ShortcutJob {
             dispatch_index: 0,
             armed: false,
             transferred: false,
+            forwarded_delivery: false,
         })
     }
+    pub fn forwarded_delivery(&self) -> bool {
+        self.forwarded_delivery
+    }
+
     pub fn binding_identity(&self) -> (&str, &str) {
         (&self.request.lease, &self.request.input_binding)
     }
@@ -582,6 +589,21 @@ impl ShortcutJob {
                             )
                             .map_err(|_| "invalid staged input")?,
                         );
+                        // Plain forwarded ownership already lives in the controller,
+                        // as on the warm cache path. Only shortcut effects need a
+                        // durable receipt. Recovery and duplicate checks above must
+                        // still run before selecting this path.
+                        if self.staged.as_ref().unwrap().is_fully_forwarded() {
+                            self.forwarded_delivery = true;
+                            let mut reply = self
+                                .staged
+                                .take()
+                                .unwrap()
+                                .deliver_forwarded(controller, Instant::now(), guard)
+                                .map_err(|_| "forwarded delivery unavailable")?;
+                            reply["operation_id"] = json!(self.request.operation_id);
+                            return Ok(Some(reply));
+                        }
                         if self.staged.as_ref().unwrap().intents().len() > 1 {
                             return Err("multiple shortcut actions per batch unavailable".into());
                         }
@@ -948,7 +970,139 @@ mod tests {
         }
     }
     #[test]
-    fn validated_batch_waits_for_durable_receipt_before_delivery() {
+    fn forwarded_batch_does_not_bypass_unresolved_journal() {
+        use crate::shortcut_journal::{Journal, Record};
+        for phase in [Phase::Armed, Phase::RecoveryRequired] {
+            let trace = Rc::new(RefCell::new(Vec::new()));
+            let mut controller = Controller::new(BackendFake(trace.clone()), true);
+            let now = Instant::now();
+            let lease = controller.handle(
+                "amaterasu.stream-session",
+                serde_json::from_value(json!({"action":"acquire","ttl_ms":30000})).unwrap(),
+                now,
+                &mut || Ok(()),
+            )["lease"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let payload = json!({"action":"batch","lease":lease,"input_binding":"authority-token","operation_id":"input-epoch:2","events":[Event::Key { key:Key::LinuxEvdev{code:2},state:KeyState::Down }]});
+            let mut journal = Journal::new("input-epoch".into()).unwrap();
+            journal.next_sequence = 2;
+            journal.revision = 1;
+            journal.receipts.insert(
+                1,
+                Record {
+                    fingerprint: json!({"operation_id":"input-epoch:1"}),
+                    disposition: json!([]),
+                    held: json!([]),
+                    forwarded_events: json!([]),
+                    intents: vec![],
+                    phase,
+                    result: None,
+                },
+            );
+            journal.validate().unwrap();
+            let mut host = Host {
+                value: Some(json!(journal)),
+                ..Host::default()
+            };
+            let mut job = ShortcutJob::new(
+                7,
+                "amaterasu.stream-session".into(),
+                payload,
+                LifecycleTarget::Stream {
+                    host_epoch: "host".into(),
+                    session_id: "session".into(),
+                    stream_id: "stream".into(),
+                    generation: 1,
+                },
+                now + Duration::from_secs(20),
+                "boot".into(),
+            )
+            .unwrap();
+            let mut failure = None;
+            for _ in 0..100 {
+                match job.advance(
+                    &mut controller,
+                    &mut |command| host.send(command),
+                    &mut || Ok(()),
+                ) {
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Ok(Some(_)) => panic!("unresolved journal admitted input"),
+                }
+            }
+            assert!(failure.unwrap().contains("requires recovery"));
+            assert!(trace.borrow().is_empty());
+            assert!(!job.forwarded_delivery());
+        }
+    }
+
+    #[test]
+    fn maximum_forwarded_batch_survives_cold_shortcut_cache() {
+        let trace = Rc::new(RefCell::new(Vec::new()));
+        let mut controller = Controller::new(BackendFake(trace.clone()), true);
+        let now = Instant::now();
+        let lease = controller.handle(
+            "amaterasu.stream-session",
+            serde_json::from_value(json!({"action":"acquire","ttl_ms":30000})).unwrap(),
+            now,
+            &mut || Ok(()),
+        )["lease"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let events: Vec<_> = (1..=64)
+            .map(|code| Event::Key {
+                key: Key::LinuxEvdev { code },
+                state: KeyState::Down,
+            })
+            .collect();
+        let payload = json!({"action":"batch","lease":lease,"input_binding":"authority-token","operation_id":"input-epoch:1","events":events});
+        let mut job = ShortcutJob::new(
+            7,
+            "amaterasu.stream-session".into(),
+            payload,
+            LifecycleTarget::Stream {
+                host_epoch: "host".into(),
+                session_id: "session".into(),
+                stream_id: "stream".into(),
+                generation: 1,
+            },
+            now + Duration::from_secs(20),
+            "boot".into(),
+        )
+        .unwrap();
+        let mut host = Host::default();
+        let mut result = None;
+        for _ in 0..100 {
+            if let Some(value) = job
+                .advance(
+                    &mut controller,
+                    &mut |command| host.send(command),
+                    &mut || Ok(()),
+                )
+                .unwrap()
+            {
+                result = Some(value);
+                break;
+            }
+        }
+        let result = result.expect("forwarded batch completed");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["accepted"], 64);
+        assert_eq!(trace.borrow().len(), 64);
+        assert!(
+            host.value.is_none(),
+            "plain forwarded keys need no shortcut journal write"
+        );
+    }
+
+    #[test]
+    fn validated_forwarded_batch_uses_guarded_native_delivery() {
         let trace = Rc::new(RefCell::new(Vec::new()));
         let mut controller = Controller::new(BackendFake(trace.clone()), true);
         let now = Instant::now();
@@ -1001,41 +1155,9 @@ mod tests {
             host.registry_requests, 0,
             "a binding with no actions needs no registry"
         );
-        assert_eq!(
-            host.value.as_ref().unwrap()["receipts"]["1"]["phase"],
-            "delivered"
-        );
-        let target = LifecycleTarget::Stream {
-            host_epoch: "host".into(),
-            session_id: "session".into(),
-            stream_id: "stream".into(),
-            generation: 1,
-        };
-        let mut duplicate = ShortcutJob::new(
-            8,
-            "amaterasu.stream-session".into(),
-            payload,
-            target,
-            now + Duration::from_secs(20),
-            "boot".into(),
-        )
-        .unwrap();
-        let mut duplicate_result = None;
-        for _ in 0..50 {
-            if let Some(value) = duplicate
-                .advance(
-                    &mut controller,
-                    &mut |command| host.send(command),
-                    &mut || Ok(()),
-                )
-                .unwrap()
-            {
-                duplicate_result = Some(value);
-                break;
-            }
-        }
-        assert_eq!(duplicate_result.unwrap()["operation_id"], "input-epoch:1");
-        assert_eq!(trace.borrow().len(), 1);
+        assert!(host.value.is_none());
+        assert!(job.forwarded_delivery());
+        assert!(job.take_cache_snapshot().unwrap().bindings.is_empty());
     }
     #[test]
     fn actionful_batch_reserves_before_consuming_and_dispatches_after_delivery_receipt() {
@@ -1072,8 +1194,8 @@ mod tests {
         let mut job = ShortcutJob::new(
             7,
             "amaterasu.stream-session".into(),
-            payload,
-            target,
+            payload.clone(),
+            target.clone(),
             now + Duration::from_secs(20),
             "boot".into(),
         )
@@ -1126,8 +1248,35 @@ mod tests {
         assert_eq!(host.commits, 1);
         assert!(host.registry_requests >= 2);
         assert_eq!(
-            host.value.unwrap()["receipts"]["1"]["intents"][0]["phase"],
+            host.value.as_ref().unwrap()["receipts"]["1"]["intents"][0]["phase"],
             "terminal"
         );
+        assert!(!job.forwarded_delivery());
+        let mut duplicate = ShortcutJob::new(
+            8,
+            "amaterasu.stream-session".into(),
+            payload,
+            target,
+            now + Duration::from_secs(20),
+            "boot".into(),
+        )
+        .unwrap();
+        let mut duplicate_result = None;
+        for _ in 0..100 {
+            if let Some(value) = duplicate
+                .advance(
+                    &mut controller,
+                    &mut |command| host.send(command),
+                    &mut || Ok(()),
+                )
+                .unwrap()
+            {
+                duplicate_result = Some(value);
+                break;
+            }
+        }
+        assert_eq!(duplicate_result.unwrap()["operation_id"], "input-epoch:1");
+        assert_eq!(host.commits, 1);
+        assert!(trace.borrow().is_empty());
     }
 }

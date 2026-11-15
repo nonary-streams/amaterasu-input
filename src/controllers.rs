@@ -515,6 +515,63 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_completion_loss_cleans_only_selected_binding() {
+        use amaterasu_module_sdk::{ModuleResult, Response};
+        let responses: Vec<ModuleResult<Response>> = vec![
+            Ok(Response::Ok),
+            Ok(Response::Error {
+                code: "request_ended".into(),
+                message: "ended".into(),
+            }),
+            Ok(Response::Error {
+                code: "not_found".into(),
+                message: "gone".into(),
+            }),
+            Err("transport lost".into()),
+            Ok(Response::Error {
+                code: "internal".into(),
+                message: "failed".into(),
+            }),
+        ];
+        for response in responses {
+            let success = matches!(&response, Ok(Response::Ok));
+            let now = Instant::now();
+            let (mut pool, trace) = pool();
+            let first = acquire(&mut pool, "one", json!({}), now)["lease"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let second = acquire(&mut pool, "two", json!({}), now)["lease"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            batch(&mut pool, &first, vec![key(KeyState::Down)], now);
+            batch(&mut pool, &second, vec![key(KeyState::Down)], now);
+            pool.select_binding("one");
+            let reply = json!({"ok":true});
+            let cleanup = crate::completion_requires_cleanup(true, &reply);
+            let _ = crate::complete_input_response(response, cleanup, || pool.cancel_owner(OWNER));
+            assert_eq!(
+                pool.shortcut_source_held_keys(OWNER, &first, now).is_ok(),
+                success
+            );
+            assert_eq!(
+                trace.borrow().events.contains(&(1, key(KeyState::Up))),
+                !success
+            );
+            assert_eq!(trace.borrow().stopped.contains(&1), !success);
+            pool.select_binding("two");
+            assert_eq!(
+                pool.shortcut_source_held_keys(OWNER, &second, now)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(!trace.borrow().stopped.contains(&2));
+        }
+    }
+
+    #[test]
     fn clients_hold_the_same_key_and_retire_only_the_selected_devices() {
         let now = Instant::now();
         let (mut pool, trace) = pool();
