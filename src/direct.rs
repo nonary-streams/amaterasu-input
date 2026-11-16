@@ -49,6 +49,10 @@ impl InputModule {
         }
         self.controller.select_request(call.caller, &call.payload);
         let started = Instant::now();
+        let lease = call.payload["lease"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         let bound = call.payload.get("operation_id").is_some()
             || call.payload.get("input_binding").is_some();
         let reply = if bound {
@@ -56,8 +60,9 @@ impl InputModule {
         } else {
             self.direct_unbound_batch(call.caller, call.payload)
         };
-        if reply.is_some() {
+        if let Some(reply) = &reply {
             self.batch_trace.direct_batch(started);
+            self.stream_issues.batch_reply(&lease, reply);
         }
         reply
     }

@@ -26,6 +26,7 @@ pub use model::{Key as ShortcutKey, KeyState as ShortcutKeyState};
 mod product_settings;
 mod session_binding;
 mod shutdown;
+mod stream_issues;
 
 use amaterasu_input_policy::KeyBindings;
 use amaterasu_module_sdk::{
@@ -89,6 +90,7 @@ struct InputModule {
     pending_retirement_acknowledgement: Option<session_binding::PendingRetirementAcknowledgement>,
     shutdown: shutdown::Shutdown,
     batch_trace: direct::BatchTrace,
+    stream_issues: stream_issues::StreamIssues,
 }
 
 #[derive(Clone)]
@@ -245,6 +247,7 @@ impl ManagedModule for InputModule {
             pending_revoke: None,
             pending_retirement_acknowledgement: None,
             shutdown: shutdown::Shutdown::default(),
+            stream_issues: enabled_stream_issues(),
         })
     }
     fn prepare_shutdown(&mut self, remaining_ms: u64) -> ModuleResult<()> {
@@ -267,6 +270,9 @@ impl ManagedModule for InputModule {
         for summary in self.controller.timing_summaries(Instant::now()) {
             amaterasu_module_sdk::diagnostics::log_window(&self.runtime, "input.timing", &summary);
         }
+        let runtime = &self.runtime;
+        self.stream_issues
+            .publish(&mut |command| runtime.send(command));
         self.controller.expire_all(Instant::now());
         self.controller.select_default();
         self.advance_retirement_acknowledgement()?;
@@ -320,6 +326,7 @@ impl InputModule {
             payload,
             deadline: Instant::now() + Duration::from_millis(remaining_ms),
         };
+        self.stream_issues.track(request.id, &request.payload);
         if self.reject_shutdown_request(&request)? {
             return Ok(());
         }
@@ -1297,12 +1304,19 @@ impl InputModule {
         caller: &str,
         cleanup_on_loss: bool,
     ) -> ModuleResult<()> {
+        self.stream_issues.completed(request, &payload);
         complete_input_response(
             self.runtime.send(Command::Complete { request, payload }),
             cleanup_on_loss,
             || self.controller.cancel_owner(caller),
         )
     }
+}
+
+fn enabled_stream_issues() -> stream_issues::StreamIssues {
+    let mut issues = stream_issues::StreamIssues::default();
+    issues.enable();
+    issues
 }
 
 fn complete_input_response(
