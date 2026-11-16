@@ -3889,48 +3889,75 @@ fn repeat_metadata_is_validated_across_split_batches_and_cleanup_releases_tempor
 }
 
 #[test]
-fn repeat_metadata_rejects_bad_masks_or_orphaned_mismatched_markers() {
+fn repeat_metadata_is_repaired_where_it_can_apply_and_skipped_otherwise() {
     let mut controller = Controller::new(FakeBackend::default(), true);
     let token = acquire(&mut controller, Instant::now());
-    for event in [
-        moonlight_key(0x41, KeyState::Down, 0b1000, false),
-        moonlight_key(0x41, KeyState::Up, 1, false),
-        moonlight_key(0x10, KeyState::Repeat, 0, true),
-        moonlight_key(0x1b, KeyState::Down, 0, true),
-    ] {
-        assert_eq!(batch(&mut controller, &token, vec![event])["dropped"], 1);
-        assert!(controller.backend.trace.borrow().is_empty());
-    }
+    let send = |controller: &mut Controller<FakeBackend>, events| {
+        let reply = batch(controller, &token, events);
+        assert_eq!(reply["ok"], true, "{reply}");
+        eprintln!("REPLY {reply}");
+        reply["dropped"].as_u64().unwrap_or(0)
+    };
+    // A key-down whose repeat modifier (Shift) is not held still types the
+    // key, without it; its key-up releases it.
+    assert_eq!(
+        send(
+            &mut controller,
+            vec![moonlight_key(0x41, KeyState::Down, 1, false)]
+        ),
+        0
+    );
+    assert_eq!(controller.pressed.len(), 1);
+    assert_eq!(
+        send(
+            &mut controller,
+            vec![moonlight_key(0x41, KeyState::Up, 1, false)]
+        ),
+        0
+    );
+    assert!(controller.pressed.is_empty());
 
+    // A key-up whose temporary marker differs from its key-down still
+    // releases the key, so it never keeps repeating.
     assert_eq!(
-        batch(
+        send(
             &mut controller,
-            &token,
-            vec![moonlight_key(0x41, KeyState::Down, 1, false)],
-        )["dropped_code"],
-        "invalid_sequence"
-    );
-    assert_eq!(
-        batch(
-            &mut controller,
-            &token,
-            vec![moonlight_key(0x10, KeyState::Up, 0, true)],
-        )["dropped_code"],
-        "invalid_sequence"
-    );
-    assert_eq!(
-        batch(
-            &mut controller,
-            &token,
             vec![
                 moonlight_key(0x10, KeyState::Down, 0, true),
                 moonlight_key(0x10, KeyState::Up, 0, false),
-            ],
-        )["dropped_code"],
-        "invalid_sequence"
+            ]
+        ),
+        0
     );
-    // The key-down applies; only the mismatched release is skipped.
-    assert_eq!(controller.backend.trace.borrow().len(), 1);
+    assert!(controller.pressed.is_empty());
+
+    // Bits beyond Shift, Ctrl and Alt are dropped; the key still types.
+    assert_eq!(
+        send(
+            &mut controller,
+            vec![moonlight_key(0x41, KeyState::Down, 0b1000, false)]
+        ),
+        0
+    );
+    assert_eq!(
+        send(
+            &mut controller,
+            vec![moonlight_key(0x41, KeyState::Up, 0, false)]
+        ),
+        0
+    );
+    assert!(controller.pressed.is_empty());
+
+    // Events with nothing to apply to are skipped: a repeat or release of a
+    // key that is not held, a temporary marker on a non-modifier key.
+    for event in [
+        moonlight_key(0x10, KeyState::Repeat, 0, true),
+        moonlight_key(0x10, KeyState::Up, 0, true),
+        moonlight_key(0x1b, KeyState::Down, 0, true),
+    ] {
+        assert_eq!(send(&mut controller, vec![event]), 1);
+    }
+    assert!(controller.pressed.is_empty());
 }
 
 #[test]

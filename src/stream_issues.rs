@@ -120,6 +120,12 @@ impl StreamIssues {
                 return;
             }
             stream.events_dropped_reported = true;
+            // The rule is a fixed message and never names the key.
+            eprintln!(
+                "input skipped events stream={} rule={}",
+                stream.operation,
+                reply["dropped_reason"].as_str().unwrap_or("unspecified")
+            );
             let reason = reply["dropped_code"]
                 .as_str()
                 .filter(|code| identifier(code));

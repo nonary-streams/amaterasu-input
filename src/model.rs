@@ -677,7 +677,29 @@ impl Key {
         }
     }
 
-    fn without_repeat_modifiers(&self) -> Self {
+    /// The same key with its temporary-modifier marker flipped.
+    pub(crate) fn with_other_temporary_marker(&self) -> Option<Self> {
+        match self {
+            Self::MoonlightVk {
+                code,
+                normalized,
+                repeat_modifiers,
+                temporary_modifier,
+            } => Some(Self::MoonlightVk {
+                code: *code,
+                normalized: *normalized,
+                repeat_modifiers: *repeat_modifiers,
+                temporary_modifier: !temporary_modifier,
+            }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn has_repeat_modifiers(&self) -> bool {
+        matches!(self, Self::MoonlightVk { repeat_modifiers, .. } if *repeat_modifiers != 0)
+    }
+
+    pub(crate) fn without_repeat_modifiers(&self) -> Self {
         match self {
             Self::MoonlightVk {
                 code,

@@ -42,6 +42,9 @@ pub(crate) struct PreparedBatch {
 pub(crate) struct DroppedEvents {
     pub count: usize,
     pub first_code: Option<&'static str>,
+    /// The rule the first skipped event broke. A fixed message; it never
+    /// carries the event or its key.
+    pub first_reason: Option<String>,
 }
 
 impl PreparedBatch {
@@ -1331,10 +1334,26 @@ impl<B: Backend> Controller<B> {
         let mut dropped = DroppedEvents::default();
         for event in events {
             kept.push(event);
-            if let Err(error) = self.validate_batch(&kept) {
+            let Err(error) = self.validate_batch(&kept) else {
+                continue;
+            };
+            let event = kept.pop().expect("just pushed");
+            // A key event that broke only a Moonlight marker rule still
+            // applies once repaired: a dropped key-up would leave the key
+            // held and repeating, a dropped key-down would lose the letter.
+            let repaired = repaired_key_events(&event).into_iter().find(|candidate| {
+                kept.push(candidate.clone());
+                let valid = self.validate_batch(&kept).is_ok();
                 kept.pop();
-                dropped.count += 1;
-                dropped.first_code.get_or_insert(error.code);
+                valid
+            });
+            match repaired {
+                Some(candidate) => kept.push(candidate),
+                None => {
+                    dropped.count += 1;
+                    dropped.first_code.get_or_insert(error.code);
+                    dropped.first_reason.get_or_insert(error.message);
+                }
             }
         }
         Ok((kept, dropped))
@@ -1462,6 +1481,9 @@ impl<B: Backend> Controller<B> {
         if dropped.count > 0 {
             reply["dropped"] = dropped.count.into();
             reply["dropped_code"] = dropped.first_code.unwrap_or("invalid_event").into();
+            if let Some(reason) = dropped.first_reason {
+                reply["dropped_reason"] = reason.into();
+            }
         }
         reply
     }
@@ -2343,3 +2365,31 @@ fn operation_conflict() -> InputError {
 }
 #[cfg(test)]
 mod tests;
+
+/// Key events that may apply where `event` did not: the key-down without
+/// repeat modifiers that are not held, and the key-up without repeat
+/// modifiers and with either temporary marker, so it releases the held key.
+fn repaired_key_events(event: &Event) -> Vec<Event> {
+    let Event::Key { key, state } = event else {
+        return Vec::new();
+    };
+    let repaired = |key: crate::model::Key| Event::Key { key, state: *state };
+    match state {
+        KeyState::Down if key.has_repeat_modifiers() => {
+            vec![repaired(key.without_repeat_modifiers())]
+        }
+        // A release must always land. Clients may copy the key-down's repeat
+        // modifiers or a different temporary marker into the key-up.
+        KeyState::Up => {
+            let plain = key.without_repeat_modifiers();
+            let flipped = plain.with_other_temporary_marker();
+            std::iter::once(plain)
+                .chain(flipped)
+                .chain(key.with_other_temporary_marker())
+                .filter(|candidate| candidate != key)
+                .map(repaired)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
