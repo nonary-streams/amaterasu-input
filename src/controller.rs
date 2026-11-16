@@ -30,7 +30,18 @@ pub(crate) struct PreparedBatch {
     caller: String,
     token: String,
     events: Vec<Event>,
+    /// Submitted events skipped as invalid on their own.
+    dropped: DroppedEvents,
     context: Value,
+}
+
+/// Events skipped from a batch because they could not apply to the lease's
+/// input state, such as a key-up for a key this lease never pressed. The
+/// stream keeps every other event; the first skipped event's code is kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DroppedEvents {
+    pub count: usize,
+    pub first_code: Option<&'static str>,
 }
 
 impl PreparedBatch {
@@ -1193,7 +1204,7 @@ impl<B: Backend> Controller<B> {
             ));
         }
         match self.prepare_native_events(caller, token, events, now) {
-            Ok(events) => self.deliver_events(token, events, now, guard),
+            Ok((events, dropped)) => self.deliver_events(token, events, dropped, now, guard),
             Err(error) => self.failure(error),
         }
     }
@@ -1249,8 +1260,10 @@ impl<B: Backend> Controller<B> {
         events: Vec<Event>,
         now: Instant,
     ) -> InputResult<PreparedBatch> {
+        let (events, dropped) = self.prepare_native_events(caller, token, events, now)?;
         Ok(PreparedBatch {
-            events: self.prepare_native_events(caller, token, events, now)?,
+            events,
+            dropped,
             caller: caller.into(),
             token: token.into(),
             context: self.batch_context(caller),
@@ -1263,7 +1276,7 @@ impl<B: Backend> Controller<B> {
         token: &str,
         mut events: Vec<Event>,
         now: Instant,
-    ) -> InputResult<Vec<Event>> {
+    ) -> InputResult<(Vec<Event>, DroppedEvents)> {
         self.authorize_batch_source(caller, token, now)?;
         // Generic and left-side modifier VKs name the same physical source in
         // legacy clients. Resolve releases to the original source plan, while
@@ -1293,10 +1306,38 @@ impl<B: Backend> Controller<B> {
                 }
             }
         }
-        if !events.is_empty() {
-            self.validate_batch(&events)?;
+        if events.is_empty() {
+            return Ok((events, DroppedEvents::default()));
         }
-        Ok(events)
+        self.keep_applicable_events(events)
+    }
+
+    /// Validate a batch event by event against the lease's input state. An
+    /// event that cannot apply on its own is skipped and counted, never the
+    /// whole batch: clients routinely send a key-up whose key-down reached
+    /// another window, and refusing the batch would drop the keys around it.
+    /// A batch-level problem, such as its size, still refuses the batch.
+    fn keep_applicable_events(
+        &self,
+        events: Vec<Event>,
+    ) -> InputResult<(Vec<Event>, DroppedEvents)> {
+        if events.len() > MAX_EVENTS {
+            return Err(InputError::new(
+                "invalid_request",
+                "input batch must contain 1..64 events",
+            ));
+        }
+        let mut kept: Vec<Event> = Vec::with_capacity(events.len());
+        let mut dropped = DroppedEvents::default();
+        for event in events {
+            kept.push(event);
+            if let Err(error) = self.validate_batch(&kept) {
+                kept.pop();
+                dropped.count += 1;
+                dropped.first_code.get_or_insert(error.code);
+            }
+        }
+        Ok((kept, dropped))
     }
 
     /// Deliver once after the caller has durably armed its receipt and intents.
@@ -1338,13 +1379,20 @@ impl<B: Backend> Controller<B> {
                 "input lease expired during batch",
             ));
         }
-        self.deliver_events(&prepared.token, prepared.events, now, guard)
+        self.deliver_events(
+            &prepared.token,
+            prepared.events,
+            prepared.dropped,
+            now,
+            guard,
+        )
     }
 
     fn deliver_events(
         &mut self,
         token: &str,
         events: Vec<Event>,
+        dropped: DroppedEvents,
         now: Instant,
         guard: &mut impl FnMut() -> InputResult<()>,
     ) -> Value {
@@ -1408,7 +1456,14 @@ impl<B: Backend> Controller<B> {
                 return reply;
             }
         }
-        json!({"ok":true,"accepted":events.len(),"suppressed":suppressed,"lease":token})
+        // Skipped events were handled: the submitter must not resend them.
+        let mut reply = json!({"ok":true,"accepted":events.len() + dropped.count,
+            "suppressed":suppressed,"lease":token});
+        if dropped.count > 0 {
+            reply["dropped"] = dropped.count.into();
+            reply["dropped_code"] = dropped.first_code.unwrap_or("invalid_event").into();
+        }
+        reply
     }
 
     fn batch_context(&self, caller: &str) -> Value {

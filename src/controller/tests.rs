@@ -2451,7 +2451,7 @@ fn release_and_expiry_release_chords_in_reverse_order() {
     }
 }
 #[test]
-fn whole_batch_validation_precedes_every_native_effect() {
+fn an_inapplicable_event_is_skipped_without_refusing_the_batch() {
     let mut controller = Controller::new(
         FakeBackend {
             reject_absolute: true,
@@ -2460,21 +2460,50 @@ fn whole_batch_validation_precedes_every_native_effect() {
         true,
     );
     let token = acquire(&mut controller, Instant::now());
-    for events in [
-        vec![key(30, KeyState::Down), Event::Absolute { x: 1, y: 2 }],
-        vec![key(30, KeyState::Down), key(30, KeyState::Down)],
-        vec![key(30, KeyState::Repeat)],
-        vec![key(30, KeyState::Up)],
-        vec![Event::Relative {
-            dx: i32::MAX,
-            dy: 0,
-        }],
-        vec![Event::Relative { dx: 1, dy: 1 }; 65],
+    // Each batch keeps its applicable events and skips only the one that
+    // cannot apply, reporting it as handled so the client never resends it.
+    for (events, applied, code) in [
+        (
+            vec![key(30, KeyState::Down), Event::Absolute { x: 1, y: 2 }],
+            1,
+            None,
+        ),
+        (
+            vec![key(31, KeyState::Down), key(31, KeyState::Down)],
+            1,
+            Some("invalid_sequence"),
+        ),
+        (vec![key(32, KeyState::Repeat)], 0, Some("invalid_sequence")),
+        (vec![key(33, KeyState::Up)], 0, Some("invalid_sequence")),
+        (
+            vec![Event::Relative {
+                dx: i32::MAX,
+                dy: 0,
+            }],
+            0,
+            None,
+        ),
     ] {
-        assert_eq!(batch(&mut controller, &token, events)["ok"], false);
-        assert!(controller.backend.trace.borrow().is_empty());
-        assert!(controller.pressed.is_empty());
+        let submitted = events.len();
+        controller.backend.trace.borrow_mut().clear();
+        let reply = batch(&mut controller, &token, events);
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["accepted"], submitted);
+        assert_eq!(reply["dropped"], submitted - applied);
+        if let Some(code) = code {
+            assert_eq!(reply["dropped_code"], code);
+        }
+        assert_eq!(controller.backend.trace.borrow().is_empty(), applied == 0);
     }
+    // A batch-level problem still refuses the whole batch before any effect.
+    controller.backend.trace.borrow_mut().clear();
+    let oversized = batch(
+        &mut controller,
+        &token,
+        vec![Event::Relative { dx: 1, dy: 1 }; 65],
+    );
+    assert_eq!(oversized["ok"], false);
+    assert!(controller.backend.trace.borrow().is_empty());
 }
 #[test]
 fn cancellation_mid_batch_releases_accepted_inputs_and_ends_lease() {
@@ -2990,13 +3019,17 @@ fn explicitly_remapped_modifier_sources_are_distinct_and_native_encodings_cannot
         },
         state: KeyState::Up,
     };
-    let rejected = batch(
+    // The left-shift release does not match the generic shift that is held,
+    // so only it is skipped.
+    let skipped = batch(
         &mut controller,
         &token,
         vec![generic_shift.clone(), left_shift_up.clone()],
     );
-    assert_eq!(rejected["error"]["code"], "invalid_sequence");
-    assert!(controller.pressed.is_empty());
+    assert_eq!(skipped["ok"], true);
+    assert_eq!(skipped["dropped"], 1);
+    assert_eq!(skipped["dropped_code"], "invalid_sequence");
+    assert_eq!(controller.pressed.len(), 1);
 
     assert_eq!(
         batch(
@@ -3025,10 +3058,11 @@ fn explicitly_remapped_modifier_sources_are_distinct_and_native_encodings_cannot
             &mut controller,
             &token,
             vec![generic_shift, key(42, KeyState::Up)]
-        )["error"]["code"],
+        )["dropped_code"],
         "invalid_sequence"
     );
-    assert!(controller.pressed.is_empty());
+    // The native-encoded key-up is skipped; the generic shift is held.
+    assert_eq!(controller.pressed.len(), 1);
 }
 
 #[test]
@@ -3058,7 +3092,7 @@ fn raw_key_cleanup_keeps_the_keydown_mode_and_rejects_cross_mode_duplicate() {
         state: KeyState::Down,
     };
     assert_eq!(
-        batch(&mut controller, &token, vec![normalized_duplicate])["error"]["code"],
+        batch(&mut controller, &token, vec![normalized_duplicate])["dropped_code"],
         "invalid_sequence"
     );
 
@@ -3864,7 +3898,7 @@ fn repeat_metadata_rejects_bad_masks_or_orphaned_mismatched_markers() {
         moonlight_key(0x10, KeyState::Repeat, 0, true),
         moonlight_key(0x1b, KeyState::Down, 0, true),
     ] {
-        assert_eq!(batch(&mut controller, &token, vec![event])["ok"], false);
+        assert_eq!(batch(&mut controller, &token, vec![event])["dropped"], 1);
         assert!(controller.backend.trace.borrow().is_empty());
     }
 
@@ -3873,7 +3907,7 @@ fn repeat_metadata_rejects_bad_masks_or_orphaned_mismatched_markers() {
             &mut controller,
             &token,
             vec![moonlight_key(0x41, KeyState::Down, 1, false)],
-        )["error"]["code"],
+        )["dropped_code"],
         "invalid_sequence"
     );
     assert_eq!(
@@ -3881,7 +3915,7 @@ fn repeat_metadata_rejects_bad_masks_or_orphaned_mismatched_markers() {
             &mut controller,
             &token,
             vec![moonlight_key(0x10, KeyState::Up, 0, true)],
-        )["error"]["code"],
+        )["dropped_code"],
         "invalid_sequence"
     );
     assert_eq!(
@@ -3892,10 +3926,11 @@ fn repeat_metadata_rejects_bad_masks_or_orphaned_mismatched_markers() {
                 moonlight_key(0x10, KeyState::Down, 0, true),
                 moonlight_key(0x10, KeyState::Up, 0, false),
             ],
-        )["error"]["code"],
+        )["dropped_code"],
         "invalid_sequence"
     );
-    assert!(controller.backend.trace.borrow().is_empty());
+    // The key-down applies; only the mismatched release is skipped.
+    assert_eq!(controller.backend.trace.borrow().len(), 1);
 }
 
 #[test]
@@ -3990,7 +4025,7 @@ fn pen_touch_rejects_duplicate_and_unowned_transitions_before_injection() {
         true
     );
     assert_eq!(
-        batch(&mut controller, &token, vec![down])["error"]["code"],
+        batch(&mut controller, &token, vec![down])["dropped_code"],
         "invalid_sequence"
     );
     for stray in [
@@ -3999,14 +4034,14 @@ fn pen_touch_rejects_duplicate_and_unowned_transitions_before_injection() {
         pen_touch(9, PenTouchDevice::Touch, PenTouchPhase::Cancel, 1, 1),
     ] {
         assert_eq!(
-            batch(&mut controller, &token, vec![stray])["error"]["code"],
+            batch(&mut controller, &token, vec![stray])["dropped_code"],
             "invalid_sequence"
         );
     }
     let up = pen_touch(8, PenTouchDevice::Touch, PenTouchPhase::Up, 2, 3);
     assert_eq!(batch(&mut controller, &token, vec![up.clone()])["ok"], true);
     assert_eq!(
-        batch(&mut controller, &token, vec![up])["error"]["code"],
+        batch(&mut controller, &token, vec![up])["dropped_code"],
         "invalid_sequence"
     );
     assert_eq!(controller.backend.trace.borrow().len(), 2);
@@ -4045,7 +4080,7 @@ fn pen_touch_limit_is_enforced_and_capability_is_reported_separately_from_policy
                 0,
                 0,
             )]
-        )["error"]["code"],
+        )["dropped_code"],
         "resource_exhausted"
     );
     assert_eq!(
@@ -4070,7 +4105,7 @@ fn pen_touch_limit_is_enforced_and_capability_is_reported_separately_from_policy
                 0,
                 0
             )]
-        )["error"]["code"],
+        )["dropped_code"],
         "unsupported_event"
     );
     assert_eq!(
@@ -4084,7 +4119,7 @@ fn pen_touch_limit_is_enforced_and_capability_is_reported_separately_from_policy
 }
 
 #[test]
-fn pen_touch_backend_capacity_rejects_an_overfull_batch_before_injection() {
+fn pen_touch_backend_capacity_skips_contacts_beyond_it() {
     let mut controller = Controller::new(
         FakeBackend {
             supports_pen_touch: true,
@@ -4101,12 +4136,12 @@ fn pen_touch_backend_capacity_rejects_an_overfull_batch_before_injection() {
         pen_touch(3, PenTouchDevice::Touch, PenTouchPhase::Down, 30, 30),
     ];
 
-    assert_eq!(
-        batch(&mut controller, &token, overfull_batch.to_vec())["error"]["code"],
-        "resource_exhausted"
-    );
-    assert!(controller.backend.trace.borrow().is_empty());
-    assert!(controller.pen_touch_contacts.is_empty());
+    // Contacts up to the backend's capacity apply; the one beyond it is skipped.
+    let reply = batch(&mut controller, &token, overfull_batch.to_vec());
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["dropped"], 1);
+    assert_eq!(reply["dropped_code"], "resource_exhausted");
+    assert_eq!(controller.pen_touch_contacts.len(), 2);
 
     assert_eq!(
         batch(
@@ -4143,7 +4178,7 @@ fn pen_touch_backend_capacity_rejects_an_overfull_batch_before_injection() {
                 40,
                 40,
             )]
-        )["error"]["code"],
+        )["dropped_code"],
         "resource_exhausted"
     );
     assert!(unavailable_pen.backend.trace.borrow().is_empty());
@@ -4381,7 +4416,7 @@ fn pen_touch_capability_loss_allows_release_and_reacquire_after_recovery() {
     controller.backend.supports_pen_touch = false;
     let move_event = pen_touch(42, PenTouchDevice::Touch, PenTouchPhase::Move, 30, 40);
     let unavailable = batch(&mut controller, &token, vec![move_event]);
-    assert_eq!(unavailable["error"]["code"], "unsupported_event");
+    assert_eq!(unavailable["dropped_code"], "unsupported_event");
     assert_eq!(controller.pen_touch_contacts.len(), 1);
 
     let release = controller.handle(
@@ -5016,10 +5051,10 @@ fn moonlight_modifier_aliases_share_ownership_and_native_encodings_cannot_mix() 
             &mut controller,
             &token,
             vec![generic_shift, key(42, KeyState::Up)]
-        )["error"]["code"],
+        )["dropped_code"],
         "invalid_sequence"
     );
-    assert!(controller.pressed.is_empty());
+    assert_eq!(controller.pressed.len(), 1);
 }
 
 #[test]
@@ -5070,7 +5105,7 @@ fn touch_as_mouse_status_does_not_claim_native_pen_touch_support() {
                 3,
                 4
             )]
-        )["error"]["code"],
+        )["dropped_code"],
         "resource_exhausted"
     );
     assert_eq!(
@@ -5084,7 +5119,7 @@ fn touch_as_mouse_status_does_not_claim_native_pen_touch_support() {
                 1,
                 2,
             )]
-        )["error"]["code"],
+        )["dropped_code"],
         "unsupported_event"
     );
     assert_eq!(controller.backend.trace.borrow().len(), 1);

@@ -27,6 +27,9 @@ enum Tracked {
 struct LeaseStream {
     operation: String,
     controller_reported: bool,
+    events_dropped_reported: bool,
+    /// Batch rejection codes already reported for this lease.
+    rejections_reported: Vec<String>,
 }
 
 #[derive(Default)]
@@ -81,6 +84,8 @@ impl StreamIssues {
                 let stream = LeaseStream {
                     operation,
                     controller_reported: false,
+                    events_dropped_reported: false,
+                    rejections_reported: Vec::new(),
                 };
                 bounded_insert(&mut self.leases, lease.to_owned(), stream);
             }
@@ -99,25 +104,63 @@ impl StreamIssues {
         ));
     }
 
-    /// A batch on a stream's lease, served directly or from the queue.
+    /// A batch on a stream's lease, served directly or from the queue. The
+    /// stream continues in each case, so each is a demoted warning reported
+    /// once per lease: gamepad packets dropped while no controller is
+    /// available, single events skipped because they could not apply, and a
+    /// batch refused as a whole (its events are dropped by the session).
     pub(crate) fn batch_reply(&mut self, lease: &str, reply: &Value) {
-        if reply["ok"] == true || reply["error"]["code"] != "controller_unavailable" {
-            return;
-        }
         let Some(stream) = self.leases.get_mut(lease) else {
             return;
         };
-        if stream.controller_reported {
-            return;
-        }
-        stream.controller_reported = true;
-        let issue = StreamIssue::demoted(
-            stream.operation.clone(),
-            LifecycleLayer::Input,
-            "batch",
-            "controller_unavailable",
-            "controller_input_dropped",
-        );
+        let operation = stream.operation.clone();
+        let issue = if reply["ok"] == true {
+            let dropped = reply["dropped"].as_u64().unwrap_or(0);
+            if dropped == 0 || stream.events_dropped_reported {
+                return;
+            }
+            stream.events_dropped_reported = true;
+            let reason = reply["dropped_code"]
+                .as_str()
+                .filter(|code| identifier(code));
+            let issue = StreamIssue::demoted(
+                operation,
+                LifecycleLayer::Input,
+                "batch",
+                "input_events_skipped",
+                "skip_inapplicable_events",
+            );
+            match reason {
+                Some(reason) => issue.because(reason),
+                None => issue,
+            }
+        } else if reply["error"]["code"] == "controller_unavailable" {
+            if stream.controller_reported {
+                return;
+            }
+            stream.controller_reported = true;
+            StreamIssue::demoted(
+                operation,
+                LifecycleLayer::Input,
+                "batch",
+                "controller_unavailable",
+                "controller_input_dropped",
+            )
+        } else {
+            let code = failure_code(reply).to_owned();
+            if stream.rejections_reported.contains(&code) || stream.rejections_reported.len() >= 8 {
+                return;
+            }
+            stream.rejections_reported.push(code.clone());
+            StreamIssue::demoted(
+                operation,
+                LifecycleLayer::Input,
+                "batch",
+                "input_batch_refused",
+                "drop_refused_batch",
+            )
+            .because(code)
+        };
         self.push(issue);
     }
 
@@ -227,6 +270,36 @@ mod tests {
         assert_eq!(
             published[0].fallback.as_deref(),
             Some("controller_input_dropped")
+        );
+    }
+
+    #[test]
+    fn skipped_events_and_refused_batches_are_reported_once_per_lease() {
+        let mut issues = StreamIssues::default();
+        issues.enable();
+        issues.track(5, &json!({"action":"acquire","operation_id":"ss-3d-input"}));
+        issues.completed(5, &json!({"ok":true,"lease":"lease-1"}));
+        let skipped = json!({"ok":true,"lease":"lease-1","accepted":3,"dropped":1,
+            "dropped_code":"invalid_sequence"});
+        issues.batch_reply("lease-1", &skipped);
+        issues.batch_reply("lease-1", &skipped);
+        issues.batch_reply("lease-1", &failure("shortcut_unavailable"));
+        issues.batch_reply("lease-1", &failure("shortcut_unavailable"));
+        issues.batch_reply(
+            "lease-1",
+            &json!({"ok":true,"lease":"lease-1","accepted":2}),
+        );
+        let published = publish(&mut issues);
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0].code, "input_events_skipped");
+        assert_eq!(published[0].reason, "invalid_sequence");
+        assert_eq!(published[0].disposition, IssueDisposition::DemotedWarning);
+        assert_eq!(published[1].code, "input_batch_refused");
+        assert_eq!(published[1].reason, "shortcut_unavailable");
+        assert!(
+            published
+                .iter()
+                .all(|issue| issue.operation == "ss-3d-input")
         );
     }
 
