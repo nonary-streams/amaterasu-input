@@ -171,10 +171,6 @@ impl StreamIssues {
     }
 
     fn push(&mut self, issue: StreamIssue) {
-        eprintln!(
-            "input stream issue operation={} phase={} code={}",
-            issue.operation, issue.phase, issue.code
-        );
         self.outbox.push(issue);
     }
 
@@ -224,8 +220,11 @@ mod tests {
     fn publish(issues: &mut StreamIssues) -> Vec<StreamIssue> {
         let mut published = Vec::new();
         issues.publish(&mut |command| {
+            if matches!(command, Command::Log { .. }) {
+                return Ok(Response::Ok);
+            }
             let Command::Publish { topic, payload } = command else {
-                panic!("only stream reports are sent")
+                panic!("expected a stream report")
             };
             assert_eq!(topic, "amaterasu.stream.report/1");
             assert_eq!(payload["kind"], "issue");
