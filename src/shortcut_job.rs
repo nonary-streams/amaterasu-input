@@ -241,14 +241,10 @@ impl ShortcutJob {
         let Ok(sequence) = suffix.parse::<u64>() else {
             return false;
         };
-        if sequence.to_string() != suffix
-            || self
+        sequence.to_string() == suffix
+            && self
                 .confirm_delivery(epoch, sequence, operation_id, reservation_id)
-                .is_none()
-        {
-            return false;
-        }
-        true
+                .is_some()
     }
 
     pub fn activate_transfer(&mut self) {
