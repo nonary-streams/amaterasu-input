@@ -128,7 +128,7 @@ impl Ds4ReportEx {
             left_y: 0x80,
             right_x: 0x80,
             right_y: 0x80,
-            buttons: u16::from(DS4_DPAD_NONE).to_le_bytes(),
+            buttons: DS4_DPAD_NONE.to_le_bytes(),
             special_buttons: 0,
             left_trigger: 0,
             right_trigger: 0,

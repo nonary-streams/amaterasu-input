@@ -239,6 +239,7 @@ pub enum PenTool {
 
 /// Converts the protocol's polar tilt and clockwise rotation to native axis
 /// tilt angles. Unknown or out-of-range samples produce no derived axes.
+#[cfg(any(target_os = "linux", windows, test))]
 pub fn pen_tilt_axes(
     tilt_degrees: Option<u8>,
     rotation_degrees: Option<u16>,

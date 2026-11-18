@@ -111,24 +111,34 @@ pub(crate) struct ControllerSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
 pub(crate) enum GamepadMotionType {
     Accel,
     Gyro,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) enum GamepadTouchPhase {
+    #[cfg(target_os = "linux")]
     Hover,
     Down,
+    #[cfg(target_os = "linux")]
     Up,
+    #[cfg(target_os = "linux")]
     Move,
+    #[cfg(target_os = "linux")]
     Cancel,
+    #[cfg(target_os = "linux")]
     ButtonOnly,
+    #[cfg(target_os = "linux")]
     HoverLeave,
+    #[cfg(target_os = "linux")]
     CancelAll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct GamepadTouchReport {
     pub touchpad_index: u8,
     pub pointer_id: u32,
@@ -139,6 +149,7 @@ pub(crate) struct GamepadTouchReport {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
 pub(crate) enum GamepadBatteryState {
     Unknown,
     NotPresent,
@@ -251,6 +262,7 @@ pub(crate) fn gamepad_key_codes() -> impl Iterator<Item = u16> {
 pub(crate) trait GamepadDevice {
     fn update(&mut self, state: ControllerSnapshot) -> InputResult<()>;
 
+    #[cfg(target_os = "linux")]
     fn set_motion(
         &mut self,
         _motion_type: GamepadMotionType,
@@ -262,6 +274,7 @@ pub(crate) trait GamepadDevice {
         ))
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn set_touch(&mut self, _touch: GamepadTouchReport) -> InputResult<()> {
         Err(InputError::new(
             "unsupported_event",
@@ -269,6 +282,7 @@ pub(crate) trait GamepadDevice {
         ))
     }
 
+    #[cfg(target_os = "linux")]
     fn set_battery(
         &mut self,
         _state: GamepadBatteryState,
@@ -457,6 +471,7 @@ impl<Device: GamepadDevice> GamepadSlot<Device> {
         self.dirty |= self.device.set_ds4_back_as_touchpad_click(enabled);
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn apply_auxiliary_report(
         &mut self,
         mut send: impl FnMut(&mut Device) -> InputResult<()>,
@@ -546,6 +561,7 @@ impl<Device: GamepadDevice> GamepadSlots<Device> {
         first_error.map_or(update, Err)
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn ensure(
         &mut self,
         number: u16,
@@ -566,6 +582,7 @@ impl<Device: GamepadDevice> GamepadSlots<Device> {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn remove(&mut self, number: u16) -> InputResult<()> {
         let Some(slot) = self.devices.get_mut(usize::from(number)) else {
             return Err(InputError::new(
@@ -581,6 +598,7 @@ impl<Device: GamepadDevice> GamepadSlots<Device> {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn set_motion(
         &mut self,
         number: u16,
@@ -592,12 +610,14 @@ impl<Device: GamepadDevice> GamepadSlots<Device> {
         })
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_touch(&mut self, number: u16, touch: GamepadTouchReport) -> InputResult<()> {
         self.with_slot(number, |slot| {
             slot.apply_auxiliary_report(|device| device.set_touch(touch))
         })
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn set_battery(
         &mut self,
         number: u16,
@@ -609,6 +629,7 @@ impl<Device: GamepadDevice> GamepadSlots<Device> {
         })
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn with_slot(
         &mut self,
         number: u16,

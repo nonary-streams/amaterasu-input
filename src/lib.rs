@@ -52,8 +52,12 @@ struct Settings {
     allow_injection: bool,
     #[serde(default = "default_uinput_path")]
     uinput_path: String,
+    #[cfg(target_os = "linux")]
     #[serde(default = "default_linux_companion_socket_path")]
     linux_companion_socket_path: String,
+    #[cfg(not(target_os = "linux"))]
+    #[serde(default, rename = "linux_companion_socket_path")]
+    _linux_companion_socket_path: String,
     #[serde(default)]
     windows_backend: Option<String>,
 }
@@ -70,10 +74,6 @@ fn default_linux_companion_socket_path() -> String {
         })
         .to_string_lossy()
         .into_owned()
-}
-#[cfg(not(target_os = "linux"))]
-fn default_linux_companion_socket_path() -> String {
-    String::new()
 }
 struct InputModule {
     runtime: RuntimeClient,

@@ -71,6 +71,7 @@ impl<Plan: Copy> HeldKeyPlans<Plan> {
             .unwrap_or(proposed)
     }
 
+    #[cfg(any(target_os = "linux", windows))]
     pub fn clear(&mut self) {
         self.sources.clear();
     }
@@ -80,7 +81,7 @@ impl<Plan: Copy> HeldKeyPlans<Plan> {
         self.sources.get(source).map(|plan| &plan.native)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "linux", windows)))]
     pub fn insert(&mut self, source: u8, plan: OwnedKeyPlan<Plan>) {
         self.sources.insert(source, plan);
     }

@@ -1,9 +1,13 @@
 //! Bounded feedback mailbox owned by the active input lease.
-use amaterasu_gamestream::control::{HostFeedback, encode_host_feedback};
+use amaterasu_gamestream::control::HostFeedback;
+#[cfg(any(target_os = "linux", test))]
+use amaterasu_gamestream::control::encode_host_feedback;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(any(target_os = "linux", test))]
 const MAX_FEEDBACK_EVENTS: usize = 256;
+#[cfg(any(target_os = "linux", test))]
 const HAPTICS_PCM_CAPABILITY: u32 = 0x8000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +20,7 @@ pub(crate) struct QueuedFeedback {
 struct FeedbackState {
     generation: u64,
     active: bool,
+    #[cfg(any(target_os = "linux", test))]
     next_sequence: u64,
     last_peeked_sequence: u64,
     events: VecDeque<QueuedFeedback>,
@@ -48,6 +53,7 @@ impl FeedbackQueue {
         self.lock().generation
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn producer(
         &self,
         generation: u64,
@@ -92,6 +98,7 @@ impl FeedbackQueue {
         true
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn push(&self, generation: u64, feedback: HostFeedback) -> bool {
         if encode_host_feedback(feedback.clone()).is_err() {
             return false;
@@ -143,6 +150,7 @@ impl FeedbackQueue {
 }
 
 #[derive(Clone)]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct FeedbackProducer {
     queue: FeedbackQueue,
     generation: u64,
@@ -150,7 +158,9 @@ pub(crate) struct FeedbackProducer {
     capabilities: u32,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl FeedbackProducer {
+    #[cfg(target_os = "linux")]
     pub(crate) fn controller(&self) -> u16 {
         self.controller
     }
@@ -169,6 +179,7 @@ impl FeedbackProducer {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 trait HostFeedbackExt {
     fn controller(&self) -> u16;
     fn is_best_effort_pcm(&self) -> bool;
@@ -176,6 +187,7 @@ trait HostFeedbackExt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 enum FeedbackKind {
     Rumble,
     TriggerRumble,
@@ -185,6 +197,7 @@ enum FeedbackKind {
     AdaptiveTriggers,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl HostFeedbackExt for HostFeedback {
     fn controller(&self) -> u16 {
         match self {
